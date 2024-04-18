@@ -1,5 +1,5 @@
 import waitress
-from app import app
+from api import app
 import click
 
 @click.command()

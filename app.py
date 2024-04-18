@@ -2,8 +2,8 @@ from flask import Flask, json, jsonify, request
 import requests
 from xml.etree.ElementTree import ElementTree, Element
 from flask_sqlalchemy import SQLAlchemy
-from datetime import date
-from core.vplan import parse_vplan
+from datetime import date, timedelta
+from core.vplan import parse_vplan, parse_ueplan
 from pprint import pformat
 import hashlib
 import uuid
@@ -24,6 +24,45 @@ class SP24Access(db.Model):
     def __repr__(self):
         return '<SP24Access %r>' % self.schulnummer
     
+@app.route('/api/v1/sp24profiles/<schulnummer>', methods=['GET'])
+def get_sp24profiles(schulnummer):
+    sp24access = SP24Access.query.filter_by(schulnummer=schulnummer).first()
+    if sp24access is None:
+        print("Not found")
+        return jsonify({'error': 'Not found'}), 404
+    if request.headers.get('X-Access-Key', ) != sp24access.accessKey:
+        return jsonify({'error': 'Unauthorized'}), 401
+    dt = date.today()
+    if dt.weekday() == 5:
+        dt = dt + timedelta(days=2)
+    elif dt.weekday() == 6:
+        dt = dt + timedelta(days=1)
+    url = f"https://{sp24access.instance}/{schulnummer}/wplan/wdatenk/WPlanKl_{request.args.get('date',dt.strftime('%Y%m%d'))}.xml"
+    r = requests.get(url,
+                     auth=requests.auth.HTTPBasicAuth(sp24access.nutzer, sp24access.passwort))
+    
+    if r.status_code != 200:
+        print(r.text)
+        print("????")
+        return jsonify({'error': 'Failed to fetch data', 'content': r.text}), r.status_code
+    
+    plan = parse_ueplan(r.text)
+    if request.args.get("classes"):
+        for classPlan in plan.classPlans:
+            if classPlan.className not in request.args.get("classes").split(","):
+                plan.classPlans.remove(classPlan)
+    for i, freeDay in enumerate(plan.freeDays):
+        plan.freeDays[i] = freeDay.isoformat()
+    plan.dateCreated = plan.dateCreated.isoformat()
+    plan.dateFor = plan.dateFor.isoformat()
+    for i, cplan in enumerate(plan.uePlans):
+        for j, lesson in enumerate(cplan.lessons):
+            cplan.ue[j] = lesson.__dict__
+        plan.uePlans[i] = cplan.__dict__
+    
+    return json.dumps(plan.__dict__)
+
+
 @app.route('/api/v1/sp24plan/<schulnummer>', methods=['GET'])
 def get_sp24access(schulnummer):
     sp24access = SP24Access.query.filter_by(schulnummer=schulnummer).first()
@@ -32,7 +71,12 @@ def get_sp24access(schulnummer):
         return jsonify({'error': 'Not found'}), 404
     if request.headers.get('X-Access-Key', ) != sp24access.accessKey:
         return jsonify({'error': 'Unauthorized'}), 401
-    url = f"https://{sp24access.instance}/{schulnummer}/mobil/mobdaten/PlanKl{request.args.get('date',date.today().strftime('%Y%m%d'))}.xml"
+    dt = date.today()
+    if dt.weekday() == 5:
+        dt = dt + timedelta(days=2)
+    elif dt.weekday() == 6:
+        dt = dt + timedelta(days=1)
+    url = f"https://{sp24access.instance}/{schulnummer}/mobil/mobdaten/PlanKl{request.args.get('date',dt.strftime('%Y%m%d'))}.xml"
     r = requests.get(url,
                      auth=requests.auth.HTTPBasicAuth(sp24access.nutzer, sp24access.passwort))
     
@@ -65,10 +109,16 @@ def create_sp24access():
     nutzer = data.get('nutzer')
     passwort = data.get('passwort')
     instance = "www.stundenplan24.de"
-    
+    print(nutzer,passwort,schulnummer,instance)
+    dt = date.today()
+    if dt.weekday() == 5:
+        dt = dt + timedelta(days=2)
+    elif dt.weekday() == 6:
+        dt = dt + timedelta(days=1)
     # Perform authentication and validation of credentials here
-    r = requests.head(f"https://{instance}/{schulnummer}/mobil/mobdaten/PlanKl{date.today().strftime('%Y%m%d')}.xml",
+    r = requests.head(f"https://{instance}/{schulnummer}/mobil/mobdaten/PlanKl{dt.strftime('%Y%m%d')}.xml",
                      auth=requests.auth.HTTPBasicAuth(nutzer, passwort))
+    print(r.status_code,r.text)
     if not r.ok:
         return jsonify({'error': 'Invalid credentials'}), 401
     sp24access = SP24Access.query.filter_by(schulnummer=schulnummer).first()
@@ -83,3 +133,6 @@ def create_sp24access():
     db.session.commit()
     
     return jsonify({'accessKey': accessKey}), 201
+
+if __name__ == '__main__':
+    app.run(port=8080,debug=True)
